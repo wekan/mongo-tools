@@ -1,5 +1,18 @@
 # Database Tools Changelog
 
+## Upcoming (wekan/mongo-tools fork)
+
+Changes in the wekan/mongo-tools fork, not part of an upstream release.
+
+- Add `.github/workflows/build-binaries.yml`: a manually-triggered (workflow_dispatch)
+  GitHub Actions workflow that cross-compiles every tool (bsondump, mongodump,
+  mongoexport, mongofiles, mongoimport, mongorestore, mongostat, mongotop) with Go
+  (CGO-free, so every GOOS/GOARCH including riscv64 and loong64), names each binary
+  `<tool>-<arch>[.exe]` (matching wekan/FerretDB's `ferretdb-<arch>` naming), and
+  attaches them as individual assets to this repo's newest GitHub Release. WeKan
+  (bundle, Docker, Snap, Sandstorm) downloads the MongoDB Database Tools per-arch
+  from those releases instead of from the MongoDB website.
+
 ## 100.17.0
 
 _Released 2026-05-08_
