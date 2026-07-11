@@ -1,0 +1,120 @@
+name: Build binaries and publish to release
+
+# Manually triggered. Builds the MongoDB Database Tools (bsondump, mongodump,
+# mongoexport, mongofiles, mongoimport, mongorestore, mongostat, mongotop) from
+# THIS repo's source with Go, cross-compiling every platform (CGO disabled => pure
+# Go => any GOOS/GOARCH), names each binary <tool>-<arch>[.exe], and attaches them
+# to a GitHub Release of this repo (wekan/mongo-tools). WeKan then downloads each
+# tool per-arch from wekan/mongo-tools releases instead of from the MongoDB
+# website. The <arch> tokens match wekan/FerretDB's ferretdb-<arch> naming so a
+# consumer uses the same token for ferretdb-<arch>, mongodump-<arch>, etc.
+#
+# Because the tools are pure Go, every architecture — including ones MongoDB ships
+# no prebuilt tools for (riscv64, loong64) — is built here. A target that fails to
+# compile is skipped and reported, never fatal.
+#
+# Usage:
+#   gh workflow run build-binaries.yml                 # tag = latest git tag
+#   gh workflow run build-binaries.yml -f version=v100.13.0-wekan
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to create/update (empty = latest git tag)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, so `git describe` can resolve a release tag
+
+      - uses: actions/setup-go@v5
+        with:
+          # Match this repo's go.mod so the exact toolchain it needs is used.
+          go-version-file: go.mod
+
+      - name: Resolve release tag and tool version string
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.version }}"
+          [ -n "$TAG" ] || TAG="$(git describe --tags --abbrev=0 2>/dev/null || git describe --tags --always)"
+          [ -n "$TAG" ] || { echo "::error::could not resolve a release tag"; exit 1; }
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          # Version string stamped into each tool (strip a leading v / -wekan suffix).
+          VER="${TAG#v}"; VER="${VER%-wekan}"
+          echo "TOOLS_VER=$VER" >> "$GITHUB_ENV"
+          echo "Release tag: $TAG (version string: $VER)"
+
+      - name: Cross-compile every tool for every platform
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          TOOLS="bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongostat mongotop"
+          # name  goos  goarch  goarm   ('-' = no GOARM). Same arch tokens + set as
+          # wekan/FerretDB's build.sh so ferretdb-<arch> and mongodump-<arch> match.
+          TARGETS="
+            amd64 linux amd64 -
+            arm64 linux arm64 -
+            armhf linux arm 7
+            armel linux arm 5
+            i386 linux 386 -
+            ppc64le linux ppc64le -
+            s390x linux s390x -
+            riscv64 linux riscv64 -
+            loong64 linux loong64 -
+            win64 windows amd64 -
+            win-arm64 windows arm64 -
+            win32 windows 386 -
+            mac-amd64 darwin amd64 -
+            mac-arm64 darwin arm64 -
+            freebsd-amd64 freebsd amd64 -
+            freebsd-arm64 freebsd arm64 -
+          "
+          # No ssl/sasl tags and no -buildmode=pie: keep the build CGO-free so it
+          # cross-compiles to every GOARCH (those pull in C libs / a cross toolchain).
+          LDFLAGS="-s -w -X main.VersionStr=$TOOLS_VER -X main.GitCommit=$GITHUB_SHA"
+
+          echo "$TARGETS" | while read -r name goos goarch goarm; do
+            [ -n "${name:-}" ] || continue
+            arm=""; [ "$goarm" != "-" ] && arm="$goarm"
+            ext=""; [ "$goos" = windows ] && ext=".exe"
+            for tool in $TOOLS; do
+              if CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOARM="$arm" \
+                   go build -trimpath -ldflags "$LDFLAGS" \
+                   -o "dist/${tool}-${name}${ext}" "./${tool}/main" 2>"/tmp/${tool}-${name}.log"; then
+                echo "  built   ${tool}-${name}${ext}"
+              else
+                echo "  skipped ${tool}-${name}${ext} (does not compile)"
+                tail -2 "/tmp/${tool}-${name}.log" | sed 's/^/          /' || true
+              fi
+            done
+          done
+          echo "=== dist ==="; ls -1 dist
+          [ -n "$(ls -A dist 2>/dev/null)" ] || { echo "::error::no binaries were built"; exit 1; }
+
+      - name: Create/update the GitHub Release with all tool binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=( dist/* )
+          NOTES="MongoDB Database Tools built from the wekan/mongo-tools fork — one <tool>-<arch>[.exe] binary per platform, for use with WeKan + FerretDB v1. Built by build-binaries.yml."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit   "$RELEASE_TAG" --title "$RELEASE_TAG" --notes "$NOTES"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --title "$RELEASE_TAG" --notes "$NOTES"
+          fi
+          echo "Published ${#assets[@]} tool binaries to $RELEASE_TAG."
